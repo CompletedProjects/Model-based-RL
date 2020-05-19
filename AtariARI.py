@@ -1,7 +1,7 @@
 #!/usr/bin/python
 
 import gym
-from .ram_annotations import atari_dict
+from ram_annotations import atari_dict
 
 
 class InfoWrapper(gym.Wrapper): # Nawid - General wrapper for gym

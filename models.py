@@ -2,8 +2,8 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from .encoder import make_encoder
-from .utils import weight_init
+from encoder import make_encoder
+from utils import weight_init
 
 
 class CURL(nn.Module): # Nawid - Module for the contrastive loss

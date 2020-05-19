@@ -4,7 +4,7 @@ from skimage.util.shape import view_as_windows
 import torch
 import torch.nn as nn
 import numpy as np
-from .TransformLayer import ColorJitterLayer
+from TransformLayer import ColorJitterLayer
 
 
 def make_dir(dir_path):

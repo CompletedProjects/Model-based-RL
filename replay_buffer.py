@@ -6,7 +6,7 @@ import torch
 import time
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms, utils
-from .utils import random_crop, center_crop_image, random_color_jitter
+from utils import random_crop, center_crop_image, random_color_jitter
 
 
 class ReplayBuffer(Dataset):

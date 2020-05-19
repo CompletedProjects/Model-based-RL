@@ -3,7 +3,7 @@
 import torch
 import gym
 import numpy as np
-from .custom_wrappers import custom_wrapper
+from custom_wrappers import custom_wrapper
 
 class General_functions():
     def __init__(self, ENV_NAME, n_actions,possible_positions,info_dict):

@@ -1,10 +1,10 @@
 #!/usr/bin/python
 
 import numpy as np
-from .utils import make_dir
-from .GeneralFunctions import General_functions
-from .custom_wrappers import custom_wrapper
-from .replay_buffer import ReplayBuffer
+from utils import make_dir
+from GeneralFunctions import General_functions
+from custom_wrappers import custom_wrapper
+from replay_buffer import ReplayBuffer
 import gym
 import time
 

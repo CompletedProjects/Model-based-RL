@@ -2,7 +2,7 @@
 
 from baselines.common.atari_wrappers import EpisodicLifeEnv
 import gym
-from .AtariARI import AtariARIWrapper
+from AtariARI import AtariARIWrapper
 import numpy as np
 from collections import deque
 import cv2
