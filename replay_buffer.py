@@ -128,7 +128,7 @@ class ReplayBuffer(Dataset):
             next_obses_input = random_crop(next_obses,self.image_size)
         else:
             obses_input = center_crop_image(obses, self.image_size)
-            next_obses_input = center_crop_image_crop(next_obses,self.image_size)
+            next_obses_input = center_crop_image(next_obses,self.image_size)
 
         # random crop images
         obses_anc = random_crop(obses, self.image_size)

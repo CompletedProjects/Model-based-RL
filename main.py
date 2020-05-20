@@ -40,48 +40,55 @@ class CurlAgent(object):
         encoder_lr = 1e-4,
         encoder_tau = 0.001,
         encoder_feature_dim = 50, # This is the size of the embedding used for the
-        num_layers=4,
-        num_filters = 32,
+        dynamics_hidden_dim = 256,
         downsample = True,
         cpc_update_freq=1,
-        encoder_type = 'pixel',
         encoder_update_freq = 1,
         random_jitter = True,
-
+        detach_encoder=True,
+        dynamics_update_freq= 1
     ):
         self.device = device
         self.cpc_update_freq = cpc_update_freq
+        self.dynamics_update_freq = dynamics_update_freq
         self.image_size = obs_shape[-2] # Changed this to the numpy dimension
         self.frames = frames
+        self.detach_encoder =  detach_encoder
 
         self.encoder_tau = encoder_tau
         self.epoch_step = 0
         self.encoder_update_freq = encoder_update_freq
         self.random_jitter = random_jitter
 
-        self.CURL = CURL(encoder_type, obs_shape, encoder_feature_dim,
-                         encoder_feature_dim,downsample = downsample, num_layers=num_layers, num_filters=num_filters).to(self.device)
+        self.CURL = CURL(obs_shape, encoder_feature_dim,
+                         encoder_feature_dim,downsample = downsample).to(self.device)
 
+        self.Model = Dynamics_model(self.CURL.encoder, encoder_feature_dim,
+                                    hidden_dim=dynamics_hidden_dim).to(self.device)
 
         self.cpc_optimizer = torch.optim.Adam(
                 self.CURL.parameters(), lr=encoder_lr
             )
+        self.dynamics_optimizer = torch.optim.Adam(
+            self.Model.parameters(), lr =encoder_lr
+        )
 
         self.cross_entropy_loss = nn.CrossEntropyLoss()
+        self.MSE_loss = nn.MSELoss() # Nawid - Added this loss for the prediction
         self.train()
 
     def train(self, training = True):
         self.training = training
         self.CURL.train(training)
+        self.Model.train(training)
 
-    def update(self, train_dataloader,val_dataloader,early_stopper):
+    def update(self, train_dataloader,val_dataloader,early_stopper_contrastive, early_stopper_dynamics):
         #torch.cuda.empty_cache() # Releases cache so the GPU has more memory
-        if early_stopper.early_stop:
-            print('early stopping')
+        if early_stopper_contrastive.early_stop or early_stopper_dynamics.early_stop:
+            print('early stopping-Early stopping contrastive, Early stopping dynamics :',early_stopper_contrastive.early_stop, early_stopper_dynamics.early_stop)
             return
 
         for step, (obs, actions, next_obs, cpc_kwargs) in enumerate(train_dataloader):
-
             if step % self.encoder_update_freq == 0:
                 soft_update_params(
                     self.CURL.encoder, self.CURL.encoder_target,
@@ -91,8 +98,10 @@ class CurlAgent(object):
                 obs_anchor, obs_pos = cpc_kwargs["obs_anchor"], cpc_kwargs["obs_pos"]
                 self.update_cpc(obs_anchor, obs_pos) # Nawid -  Performs the contrastive loss I believe
 
-        self.validation(val_dataloader,early_stopper)
+            if step % self.dynamics_update_freq ==0:
+                self.update_dynamics(obs,actions,next_obs)
 
+        self.validation(val_dataloader,early_stopper_contrastive, early_stopper_dynamics)
 
     def update_cpc(self, obs_anchor, obs_pos):
         obs_anchor, obs_pos = obs_anchor.to(self.device), obs_pos.to(self.device)
@@ -109,16 +118,30 @@ class CurlAgent(object):
 
         self.cpc_optimizer.zero_grad()
         loss.backward()
-
         self.cpc_optimizer.step()  # Nawid - Used to update the cpc
 
-    def validation(self, dataloader,early_stopper):
+    def update_dynamics(self, obs,actions, next_obs):
+        obs, actions, next_obs = obs.to(self.device),actions.to(self.device), next_obs.to(self.device)
+        predicted_next_latent = self.Model(obs,actions,detach_encoder = self.detach_encoder) # only trains the fully connected part of the output, features from the encoder are not trained
+        next_latent = self.CURL.encode(next_obs,detach=True) # no gradients will flow from this output
+        prediction_loss = self.MSE_loss(predicted_next_latent,next_latent)
+        wandb.log({'Dynamics Training loss':prediction_loss.item()}) #  Need to use .item otherwise the loss will still be kept which will reduce the memory on the GPU
+
+        self.dynamics_optimizer.zero_grad()
+        prediction_loss.backward()
+        self.dynamics_optimizer.step()
+
+
+    def validation(self, dataloader,early_stopper_contrastive, early_stopper_dynamics):
         epoch_contrastive_loss = 0
+        epoch_dynamics_loss = 0
         self.CURL.eval()
+        self.Model.eval()
         with torch.no_grad():
-            for i, (obses, actions, next_obses, cpc_kwargs) in enumerate(dataloader):
+            for i, (obs, actions, next_obs, cpc_kwargs) in enumerate(dataloader):
                 obs_anchor, obs_pos = cpc_kwargs["obs_anchor"], cpc_kwargs["obs_pos"]
-                obses, obs_anchor,obs_pos = obses.to(self.device), obs_anchor.to(self.device), obs_pos.to(self.device)
+                obs, obs_anchor,obs_pos = obs.to(self.device), obs_anchor.to(self.device), obs_pos.to(self.device)
+                actions, next_obs = actions.to(self.device), next_obs.to(self.device)
                 if self.random_jitter:
                     obs_anchor, obs_pos =  random_color_jitter(obs_anchor,batch_size = obs_anchor.shape[0],frames = self.frames), random_color_jitter(obs_pos,batch_size = obs_pos.shape[0],frames= self.frames)
 
@@ -130,7 +153,7 @@ class CurlAgent(object):
                 plt.show()
                 return
                 '''
-                actions, next_obses = actions.to(self.device), next_obses.to(self.device)
+                actions, next_obs = actions.to(self.device), next_obs.to(self.device)
                 z_a = self.CURL.encode(obs_anchor) # Nawid -  Encode the anchor
                 z_pos = self.CURL.encode(obs_pos, ema=True) # Nawid- Encode the positive with the momentum encoder
                 logits = self.CURL.compute_logits(z_a, z_pos) #  Nawid- Compute the logits between them
@@ -138,12 +161,20 @@ class CurlAgent(object):
                 loss = self.cross_entropy_loss(logits, labels)
                 epoch_contrastive_loss += loss.item()
 
+                prediced_next_latent = self.Model(obs,actions,detach_encoder = self.detach_encoder) # only trains the fully connected part of the output, features from the encoder are not trained
+                next_latent = self.CURL.encode(next_obs,detach=True) # no gradients will flow from this output
+                prediction_loss = self.MSE_loss(prediced_next_latent,next_latent)
+                epoch_dynamics_loss += prediction_loss.item()
+
             average_epoch_contrastive_loss = epoch_contrastive_loss/(i+1)
+            average_epoch_dynamics_loss = epoch_dynamics_loss/(i+1)
+
             self.epoch_step += 1 # increase epoch counter
-            wandb.log({'Contrastive Validation loss':average_epoch_contrastive_loss,'epoch': self.epoch_step})
+            wandb.log({'Contrastive Validation loss':average_epoch_contrastive_loss, 'Dynamics Validation loss':average_epoch_dynamics_loss,'epoch': self.epoch_step})
 
             print('epoch:', self.epoch_step)
-            early_stopper(average_epoch_contrastive_loss,self.CURL,self.cpc_optimizer)
+            early_stopper_contrastive(average_epoch_contrastive_loss,self.CURL,self.cpc_optimizer)
+            early_stopper_dynamics(average_epoch_dynamics_loss, self.Model, self.dynamics_optimizer)
 
         self.train()
 
@@ -154,45 +185,40 @@ def make_agent(obs_shape, device, dict_info):
         frames = dict_info['frames'],
         random_jitter = dict_info['random_jitter'],
         encoder_update_freq =dict_info['encoder_update_freq'],
+        dynamics_update_freq =dict_info['dynamics_update_freq'],
         encoder_feature_dim = dict_info['encoder_feature_dim'], #  size of the embedding from the projection head
         encoder_lr = dict_info['encoder_lr'],
         encoder_tau = dict_info['encoder_tau'],
-        encoder_type = dict_info['encoder_type'],
-        num_layers = dict_info['num_layers'],
-        num_filters = dict_info['num_filters'], # num of conv filters
-        downsample = dict_info['downsample']
+        downsample = dict_info['downsample'],
+        dynamics_hidden_dim = dict_info['dynamics_hidden_dim'],
+        detach_encoder = dict_info['detach_encoder']
     )
 
 
 ENV_NAME = 'MsPacmanDeterministic-v4'
-n_actions = 4 #9 - Nawid - Change to 5 actions as the 4 other actions are simply copies of the other actions, therefore 5 actions should lower the amount of data needed.
-'''
-data_transform =  transforms.Compose([
-        transforms.ColorJitter(0.8 * 1, 0.8 * 1, 0.8 * 1, 0.2 * 1),
-        transforms.ToTensor()])
-'''
+n_actions = 4
+
 data_transform = transforms.Compose([
                                     transforms.ToTensor()])
 
 no_agents = 5
 state_space = no_agents*2
-
 parse_dict= {'pre_transform_image_size':100,
              'image_size':84,
              'frame_stack':False,
              'frames': 1,
              'state_space':state_space,
-             'train_capacity':50000,
-             'val_capacity':20000,
+             'train_capacity':100,#50000,
+             'val_capacity':100,#20000,
              'num_train_epochs':20,
              'batch_size':512,
-             'random_crop': True,
+             'random_crop': False,
              'encoder_update_freq':1,
-             'encoder_feature_dim':50,
+             'dynamics_update_freq':1,
+             'encoder_feature_dim':128,
+             'dynamics_hidden_dim': 256,
              'encoder_lr':1e-3,
              'encoder_tau':0.05, # value used for atari experiments in curl
-             'num_layers':4,
-             'num_filters':32,
              'downsample':True,
              'encoder_type':'Impala',
              'grayscale': False,
@@ -202,14 +228,15 @@ parse_dict= {'pre_transform_image_size':100,
              'save_data':False,
              'num_pretrain_epochs':25,
              'transform': data_transform,
-             'random_jitter':True
+             'random_jitter':True,
+             'detach_encoder':True
             }
 
 #custom_name = 'rand_crop-' +str(parse_dict['random_crop'])  + '_gray-' + str(parse_dict['grayscale']) + '_walls-' +str(parse_dict['walls_present'])  + '_pretrain-' + str(parse_dict['pretrain_model'])
-custom_name = 'Contrastive_hp_testing_random_jitter-'+str(parse_dict['random_jitter']) + 'frames-' +str(parse_dict['frames'])
+custom_name = 'Contrastive_hp_testing_random_jitter-'+str(parse_dict['random_jitter']) + '_encoder_tau-' +str(parse_dict['encoder_tau'])
 wandb.init(entity="nerdk312",name=custom_name, project="Embed2Contrast",config = parse_dict)
 
-possible_positions = np.load('possible_pacman_positions.npy',allow_pickle=True)
+possible_positions = np.load('/content/drive/My Drive/MsPacman-data/possible_pacman_positions.npy',allow_pickle=True)
 
 config = wandb.config
 
@@ -226,24 +253,27 @@ val_data_object.gather_random_trajectories(5000)
 data_object.replay_buffer.crop_control(parse_dict['random_crop'])
 val_data_object.replay_buffer.crop_control(parse_dict['random_crop'])
 
+# dataloader
 train_dataloader = DataLoader(data_object.replay_buffer, batch_size = parse_dict['batch_size'], shuffle = True)
 val_dataloader = DataLoader(val_data_object.replay_buffer, batch_size = parse_dict['batch_size'], shuffle = True)
 
 
 
-#test_info = [0.001,0.005,0.01,0.05,0.1,0.5,1]
-#tests = len(test_info) + 1
-tests = 1
+test_info = [0.001,0.005,0.01,0.05,0.1,0.5,1]
+tests = len(test_info) + 1
+#tests = 1
+
+#Training loop
 
 for i in range(tests):
     print(i)
     if i >0:
-        #parse_dict['encoder_tau'] = np.random.uniform(1e-4,1e-2)
-        #parse_dict['encoder_lr'] = np.random.uniform(1e-3,1e-2)
-        parse_dict['random_jitter'] = True
-        parse_dict['encoder_tau'] = test_info[i-1]
-        custom_name = 'Contrastive_hp_testing_random_jitter-'+str(parse_dict['random_jitter']) + '_encoder_tau-' +str(parse_dict['encoder_tau'])
-        wandb.init(entity="nerdk312",name=custom_name, project="Contrastive_learning",config = parse_dict)
+	#parse_dict['encoder_tau'] = np.random.uniform(1e-4,1e-2)
+        #parse_dict['dynamics_update_freq'] = np.random.uniform(1e-3,1e-2)
+
+        #parse_dict['dynamics_update_freq'] = test_info[i-1]
+        custom_name = 'Contrastive_hp_testing_dynamics-' +str(parse_dict['dynamics_update_freq'])
+        wandb.init(entity="nerdk312",name=custom_name, project="Embed_2_Contrast_dynamics_update_rate_tests",config = parse_dict)
 
     agent = make_agent(
     obs_shape = data_object.obs_shape,
@@ -252,11 +282,14 @@ for i in range(tests):
     )
 
     pretrain_model_name = 'Contrastive' +'_' + data_object.ts
+    dynamics_model_name = 'Dynamics' +'_' + data_object.ts
+
     early_stopping_contrastive = EarlyStopping_loss(patience=3, verbose=True, wandb=wandb, name=pretrain_model_name)
+    early_stopping_dynamics = EarlyStopping_loss(patience=3, verbose=True, wandb=wandb, name=dynamics_model_name)
 
     for step in range(parse_dict['num_train_epochs']):
-        if early_stopping_contrastive.early_stop: #  Stops the training if early stopping counter is hit
+        if early_stopping_contrastive.early_stop or early_stopping_dynamics.early_stop: #  Stops the training if early stopping counter is hit
             break
-        agent.update(train_dataloader,val_dataloader,early_stopping_contrastive)
+        agent.update(train_dataloader,val_dataloader,early_stopping_contrastive,early_stopping_dynamics)
 
     wandb.join()
