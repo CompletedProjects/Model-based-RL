@@ -38,7 +38,6 @@ class ReplayBuffer(Dataset):
 
 
     def add(self, obs,action,next_obs): # Nawid- Add information to replay buffer
-
         np.copyto(self.obses[self.idx], obs)
         np.copyto(self.actions[self.idx], action)
         np.copyto(self.next_obses[self.idx],next_obs)
@@ -133,40 +132,26 @@ class ReplayBuffer(Dataset):
         # random crop images
         obses_anc = random_crop(obses, self.image_size)
         pos = random_crop(pos, self.image_size)
+        next_obses_anc = random_crop(next_obses,self.image_size) # Set anchor for the next observation in order to contrast with the contrastive loss
 
         # Squeeze shape
         obses_input = np.squeeze(obses_input)
         next_obses_input = np.squeeze(next_obses_input)
         obses_anc = np.squeeze(obses_anc)
         pos = np.squeeze(pos)
+        next_obses_anc = np.squeeze(next_obses_anc)
 
         action = self.actions[idx]
-        '''
-        obses_input = torch.tensor(obses_input, device= self.device).float()
-        action = torch.as_tensor(action, device=self.device)
-        next_obses_input = torch.tensor(next_obses_input, device= self.device).float()
-        obses = torch.as_tensor(obses, device=self.device).float() # Random color jitter turns the values already into torch tenros
-        pos = torch.as_tensor(pos, device=self.device).float()
-
-        print('obses input',obses_input.shape)
-        print('actions',action.shape)
-        print('next_obses_input', next_obses_input.shape)
-        print('obses ',obses.shape)
-        print('pos', pos.shape)
-
-
-        obses = random_color_jitter(obses) #  Need to add jitter when using random crop so that the neural network cannot cheaet the pretext task according to SIMCLR
-        pos = random_color_jitter(pos)
-        '''
 
         if self.transform:
             obses_input = self.transform(obses_input)
             next_obses_input = self.transform(next_obses_input)
             obses_anc = self.transform(obses_anc)
             pos = self.transform(pos)
+            next_obses_anc = self.transform(next_obses_anc)
 
 
-        cpc_kwargs = dict(obs_anchor=obses_anc, obs_pos=pos) # Nawid  Postitive example is pos whilst anchor is obses
+        cpc_kwargs = dict(obs_anchor=obses_anc, obs_pos=pos,next_obs_anchor= next_obses_anc) # Nawid  Postitive example is pos whilst anchor is obses
         return obses_input, action, next_obses_input, cpc_kwargs
 
     def __len__(self):

@@ -53,6 +53,7 @@ class Encoder(nn.Module): # Nawid -  CNN architecture in the Impala paper
         self.layer3 = self._make_layer(self.depths[1], self.depths[2])
         self.layer4 = self._make_layer(self.depths[2], self.depths[3])
 
+
         if self.downsample:
             self.final_conv_size = 32 * 4 * 4
         else:
@@ -91,10 +92,12 @@ class Encoder(nn.Module): # Nawid -  CNN architecture in the Impala paper
         h = self.flatten(out)
         return h
 
-    def forward(self, obs, detach=False):
+    def forward(self, obs, detach_feature_map=False):
         h = self.forward_conv(obs) # Nawid - Performs conv layers
-        if detach:
+        if detach_feature_map:
+            #print('Feature_map detached')
             h = h.detach()
+
 
         h_fc = self.final_linear(h)
         h_norm = self.ln(h_fc) # Nawid - Passes through layer normalisation

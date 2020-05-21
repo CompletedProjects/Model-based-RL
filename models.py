@@ -34,7 +34,7 @@ class CURL(nn.Module): # Nawid - Module for the contrastive loss
 
         self.apply(weight_init)
 
-    def encode(self, x, detach=False, ema=False):
+    def encode(self, x, detach_map=False, ema=False):
         """
         Encoder: z_t = e(x_t)
         :param x: x_t, x y coordinates
@@ -44,14 +44,19 @@ class CURL(nn.Module): # Nawid - Module for the contrastive loss
             with torch.no_grad():
                 z_out = self.encoder_target(x)
         else:
-            z_out = self.encoder(x)
+            z_out = self.encoder(x,detach_feature_map = detach_map) # Nawid - This is used to detach the feature map
 
+        '''
         if detach:
+            print('detach being used')
             z_out = z_out.detach()
+        else:
+            print('detach not used')
+        '''
 
         return z_out
 
-    def encode_predicted(self, x, aux, detach = False, ema = False):
+    def encode_predicted(self, x, aux, detach_map = False, ema = False):
         '''
         Encoder: z_t+1 = e(x_t,action)
         :param x: x_t, image at current timestep, aux -  action taken
@@ -66,7 +71,7 @@ class CURL(nn.Module): # Nawid - Module for the contrastive loss
         if detach:
         '''
 
-        z_t = self.encode(x,detach, ema) #  obtains the embedding of the current state and I can choose to do this from the momentum encoder
+        z_t = self.encode(x,detach_map = detach_map, ema=ema) #  obtains the embedding of the current state and I can choose to do this from the momentum encoder
         concat_zt = torch.cat((z_t, aux), 1) # Join vectors along this dimension
         z_next_t = self.trunk(concat_zt)
         skip_connection = torch.matmul(z_t,self.W_skip) # linear mapping of the current embedding to make it the same shape so that the skip connection can be used

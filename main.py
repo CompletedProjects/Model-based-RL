@@ -5,8 +5,19 @@ import os
 import pickle
 import sys
 
-import wandb
+def in_notebook():
+    try:
+        from IPython import get_ipython
+        if 'IPKernelApp' not in get_ipython().config:  # pragma: no cover
+            return False
+    except ImportError:
+        return False
+    return True
 
+if in_notebook(): # Checks whether I am in a jupyter notebook
+    sys.path.append('/content/drive/My Drive/Embed_2_Contrast')
+
+import wandb
 import random
 import torch
 import torch.nn as nn
@@ -14,6 +25,9 @@ import torch.optim as optim
 import torch.nn.functional as F
 import numpy as np
 from tqdm import tqdm
+import gym
+import time
+import matplotlib.pyplot as plt
 
 from custom_wrappers import custom_wrapper
 from encoder import make_encoder
@@ -23,8 +37,7 @@ from utils import make_dir, random_crop,center_crop_image, soft_update_params, w
 from torch.autograd import Variable
 from datacollection import Data_collection
 from models import CURL, Dynamics_model
-import gym
-import time
+from replay_buffer import ReplayBuffer
 
 # Needed to create dataloaders
 from torch.utils.data import Dataset, DataLoader
@@ -115,13 +128,15 @@ class CurlAgent(object):
             obs_anchor, obs_pos = random_color_jitter(obs_anchor,batch_size = obs_anchor.shape[0],frames = self.frames), random_color_jitter(obs_pos,batch_size = obs_pos.shape[0],frames= self.frames)
 
         z_a = self.CURL.encode(obs_anchor) # Nawid -  Encode the anchor
-        #z_pos = self.CURL.encode(obs_pos) # Nawid -  Encoding without momentum encoder
         z_pos = self.CURL.encode(obs_pos, ema=True) # Nawid- Encode the positive with the momentum encoder
 
         logits = self.CURL.compute_logits(z_a, z_pos) #  Nawid- Compute the logits between them
         labels = torch.arange(logits.shape[0]).long().to(self.device)
         loss = self.cross_entropy_loss(logits, labels)
         wandb.log({'Contrastive Training loss':loss.item()})
+
+        #frozen_weights = self.CURL.encoder.final_linear.weight.detach().clone()
+        #frozen_weights = self.CURL.encoder.layer3[0].net[1].weight.detach().clone()
 
         self.cpc_optimizer.zero_grad()
         loss.backward()
@@ -132,7 +147,8 @@ class CurlAgent(object):
             obs, next_obs = random_color_jitter(obs,batch_size = obs.shape[0],frames = self.frames), random_color_jitter(next_obs,batch_size = next_obs.shape[0],frames= self.frames)
 
         next_zt = self.CURL.encode(next_obs)
-        predicted_next_zt = self.CURL.encode_predicted(obs,action,ema=True)
+        predicted_next_zt = self.CURL.encode_predicted(obs,action,ema=True) # only the embedding of the current state is made using the exponential moving average, the next latent state is obtained from the mapping
+
         logits = self.CURL.compute_logits(next_zt, predicted_next_zt)# next_zt is the anchor and predicted_next_zt is the positive example used
         labels = torch.arange(logits.shape[0]).long().to(self.device)
         loss = self.cross_entropy_loss(logits,labels)
@@ -141,6 +157,7 @@ class CurlAgent(object):
         self.cpc_optimizer.zero_grad()
         loss.backward()
         self.cpc_optimizer.step()
+
 
     '''
     def update_dynamics(self, obs,actions, next_obs):
@@ -165,7 +182,7 @@ class CurlAgent(object):
                 obs, obs_anchor,obs_pos = obs.to(self.device), obs_anchor.to(self.device), obs_pos.to(self.device)
                 actions, next_obs = actions.to(self.device), next_obs.to(self.device)
                 if self.random_jitter:
-                    obs_anchor, obs_pos =  random_color_jitter(obs_anchor,batch_size = obs_anchor.shape[0],frames = self.frames), random_color_jitter(obs_pos,batch_size = obs_pos.shape[0],frames= self.frames)
+                    obs_anchor, obs_pos = random_color_jitter(obs_anchor,batch_size = obs_anchor.shape[0],frames = self.frames), random_color_jitter(obs_pos,batch_size = obs_pos.shape[0],frames= self.frames)
                     obs, next_obs = random_color_jitter(obs,batch_size = obs.shape[0],frames = self.frames), random_color_jitter(next_obs,batch_size = next_obs.shape[0],frames= self.frames)
 
                 ''' Code to check the appearance of the image
@@ -227,7 +244,6 @@ def make_agent(obs_shape, device, dict_info):
         dynamics_hidden_dim = dict_info['dynamics_hidden_dim'],
         detach_encoder = dict_info['detach_encoder']
     )
-
 ENV_NAME = 'MsPacmanDeterministic-v4'
 n_actions = 4
 
@@ -241,10 +257,10 @@ parse_dict= {'pre_transform_image_size':100,
              'frame_stack':False,
              'frames': 1,
              'state_space':state_space,
-             'train_capacity':100,#100000,
-             'val_capacity':100,#20000,
+             'train_capacity':100000,
+             'val_capacity':20000,
              'num_train_epochs':20,
-             'batch_size':1024,
+             'batch_size':128,
              'random_crop': True,
              'encoder_update_freq':1,
              'dynamics_update_freq':1,
@@ -266,10 +282,13 @@ parse_dict= {'pre_transform_image_size':100,
             }
 
 #custom_name = 'rand_crop-' +str(parse_dict['random_crop'])  + '_gray-' + str(parse_dict['grayscale']) + '_walls-' +str(parse_dict['walls_present'])  + '_pretrain-' + str(parse_dict['pretrain_model'])
-custom_name = 'encoder_lr-' +str(parse_dict['encoder_lr']) +'_encoder_tau-' + str(parse_dict['encoder_lr'])
+custom_name = 'Batch_size-' +str(parse_dict['batch_size'])
 wandb.init(entity="nerdk312",name=custom_name, project="Embed2Contrast_Dynamics_Contrastive",config = parse_dict)
 
-possible_positions = np.load('possible_pacman_positions.npy',allow_pickle=True)
+if in_notebook():
+    possible_positions = np.load('/content/drive/My Drive/Embed_2_Contrast/possible_pacman_positions.npy',allow_pickle=True)
+else:
+    possible_positions = np.load('possible_pacman_positions.npy',allow_pickle=True)
 
 config = wandb.config
 
@@ -291,10 +310,9 @@ train_dataloader = DataLoader(data_object.replay_buffer, batch_size = parse_dict
 val_dataloader = DataLoader(val_data_object.replay_buffer, batch_size = parse_dict['batch_size'], shuffle = True)
 
 
-
-#test_info = [2,5,10,100,1000]
-#tests = len(test_info) + 1
-tests = 6
+test_info = [256,512,1024,2048]
+tests = len(test_info) + 1
+#tests = 6
 
 #Training loop
 
@@ -302,9 +320,9 @@ for i in range(tests):
     print(i)
     if i >0:
 
-        parse_dict['encoder_tau'] = np.random.uniform(1e-3,1e-2)
-        parse_dict['encoder_lr'] = np.random.uniform(1e-4,1e-2)
-        custom_name = 'Dynamics_update_freq-' +str(parse_dict['dynamics_update_freq'])
+        #parse_dict['encoder_tau'] = np.random.uniform(1e-3,1e-2)
+        #parse_dict['encoder_lr'] = np.random.uniform(1e-4,1e-2)
+        custom_name = 'Batch_size-' +str(parse_dict['batch_size'])
         wandb.init(entity="nerdk312",name=custom_name, project="Embed2Contrast_contrastive_dynamics",config = parse_dict)
 
     agent = make_agent(
