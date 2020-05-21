@@ -10,18 +10,27 @@ class CURL(nn.Module): # Nawid - Module for the contrastive loss
     """
     CURL
     """
-    def __init__(self,obs_shape, z_dim, encoder_feature_dim, downsample = True):
+    def __init__(self,obs_shape, z_dim, encoder_feature_dim,hidden_dim, downsample = True):
         super(CURL, self).__init__()
 
         # Need to fix the encoders since I do not plan to use the critics
         self.encoder = make_encoder( # Nawid - Encoder of critic which is also used for the contrastive loss
             obs_shape, encoder_feature_dim, downsample = downsample)
 
+        # Encoder target required for momentum encoding
         self.encoder_target = make_encoder( # Nawid - Encoder of critic which is also used for the contrastive loss -  Momentum encoder
             obs_shape, encoder_feature_dim, downsample = downsample)
 
         self.encoder_target.load_state_dict(self.encoder.state_dict()) # copies the parameters of the encoder into the target encoder which is changing slowly
         self.W = nn.Parameter(torch.rand(z_dim, z_dim)) # Nawid - weight vector for the bilinear product
+
+        # Part related to the dynamics
+        self.trunk = nn.Sequential(
+            nn.Linear(self.encoder.feature_dim + n_actions, hidden_dim),nn.ReLU(), # Size of the input is related to the encoder output as well as the concatenated one hot vector for the actions
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+        self.W_skip = nn.Parameter(torch.rand(self.encoder.feature_dim, hidden_dim)) # Nawid - weight vector for the skip connection
+        self.output_linear = nn.Linear(hidden_dim, z_dim)
 
         self.apply(weight_init)
 
@@ -41,21 +50,30 @@ class CURL(nn.Module): # Nawid - Module for the contrastive loss
             z_out = z_out.detach()
 
         return z_out
-    '''
+
     def encode_predicted(self, x, aux, detach = False, ema = False):
-
+        '''
         Encoder: z_t+1 = e(x_t,action)
-        :param x: x_t, image, aux -  action taken
+        :param x: x_t, image at current timestep, aux -  action taken
         :return : predicted zt+1
-
+        '''
+        '''
         if ema:
             with torch.no_grad():
-                z_out = self.encoder_target(x)
+                z_t = self.encoder_target(x) # Says whether to change the encoder value
         else:
-            z_out = self.encoder(x)
+            z_t =self.encoder(x)
+        if detach:
+        '''
 
-    '''        
-
+        z_t = self.encode(x,detach, ema) #  obtains the embedding of the current state and I can choose to do this from the momentum encoder
+        concat_zt = torch.cat((z_t, aux), 1) # Join vectors along this dimension
+        z_next_t = self.trunk(concat_zt)
+        skip_connection = torch.matmul(z_t,self.W_skip) # linear mapping of the current embedding to make it the same shape so that the skip connection can be used
+        z_next_t = z_next_t + skip_connection
+        z_next_t = F.relu(z_next_t)
+        z_next_t = self.output_linear(z_next_t)
+        return z_next_t
 
     def compute_logits(self, z_a, z_pos): # Nawid -  computes logits for contrastive loss
         """
